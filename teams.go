@@ -4,100 +4,104 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
+	"log"
 	"net/http"
-	"os"
+	"strings"
+	"time"
+
+	"github.com/go-resty/resty/v2"
 )
 
+// Microsoft Graph API エンドポイント
 const (
-	tenantID     = "YOUR_TENANT_ID"
-	clientID     = "YOUR_CLIENT_ID"
-	clientSecret = "YOUR_CLIENT_SECRET"
+	graphAPIURL       = "https://graph.microsoft.com/v1.0"
+	tokenEndpoint     = "https://login.microsoftonline.com/%s/oauth2/v2.0/token"
+	clientID          = "YOUR_CLIENT_ID"
+	clientSecret      = "YOUR_CLIENT_SECRET"
+	tenantID          = "YOUR_TENANT_ID"
+	scope             = "https://graph.microsoft.com/.default" // クライアントクレデンシャルフローで必要なスコープ
 )
 
-// アクセストークンを取得
+// アクセストークンを取得する関数
 func getAccessToken() (string, error) {
-	url := fmt.Sprintf("https://login.microsoftonline.com/%s/oauth2/v2.0/token", tenantID)
+	client := resty.New()
 
-	data := "grant_type=client_credentials" +
-		"&client_id=" + clientID +
-		"&client_secret=" + clientSecret +
-		"&scope=https://graph.microsoft.com/.default"
+	// POSTリクエストのボディを設定
+	data := map[string]string{
+		"client_id":     clientID,
+		"client_secret": clientSecret,
+		"scope":         scope,
+		"grant_type":    "client_credentials",
+	}
 
-	req, err := http.NewRequest("POST", url, bytes.NewBuffer([]byte(data)))
+	// リクエストを送信
+	resp, err := client.R().
+		SetFormData(data).
+		Post(fmt.Sprintf(tokenEndpoint, tenantID))
+
 	if err != nil {
 		return "", err
 	}
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
-	client := &http.Client{}
-	resp, err := client.Do(req)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-
-	body, _ := ioutil.ReadAll(resp.Body)
 	var result map[string]interface{}
-	json.Unmarshal(body, &result)
-
-	token, ok := result["access_token"].(string)
-	if !ok {
-		return "", fmt.Errorf("アクセストークン取得エラー: %v", result)
+	if err := json.Unmarshal(resp.Body(), &result); err != nil {
+		return "", err
 	}
 
-	return token, nil
+	// アクセストークンを取得
+	accessToken := result["access_token"].(string)
+	return accessToken, nil
 }
 
-// Teams会議を作成
-func createTeamsMeeting(accessToken string) (string, error) {
-	url := "https://graph.microsoft.com/v1.0/me/onlineMeetings"
-
-	meetingData := map[string]interface{}{
-		"startDateTime": "2025-04-03T12:00:00Z",
-		"endDateTime":   "2025-04-03T13:00:00Z",
-		"subject":       "Test Meeting",
+// Teams会議のURLを作成する関数
+func createOnlineMeeting(accessToken string) error {
+	// 会議データの作成
+	meetingRequest := map[string]interface{}{
+		"startDateTime": "2025-05-01T12:00:00Z",
+		"endDateTime":   "2025-05-01T13:00:00Z",
+		"subject":       "Sample Meeting",
 	}
 
-	jsonData, _ := json.Marshal(meetingData)
-	req, err := http.NewRequest("POST", url, bytes.NewBuffer(jsonData))
+	// リクエストをJSONに変換
+	meetingJSON, err := json.Marshal(meetingRequest)
 	if err != nil {
-		return "", err
+		return fmt.Errorf("error marshalling meeting data: %v", err)
 	}
-	req.Header.Set("Authorization", "Bearer "+accessToken)
-	req.Header.Set("Content-Type", "application/json")
 
-	client := &http.Client{}
-	resp, err := client.Do(req)
+	// 会議の作成リクエスト
+	client := resty.New()
+	resp, err := client.R().
+		SetHeader("Authorization", "Bearer "+accessToken).
+		SetHeader("Content-Type", "application/json").
+		SetBody(meetingJSON).
+		Post(fmt.Sprintf("%s/me/onlineMeetings", graphAPIURL))
+
 	if err != nil {
-		return "", err
+		return fmt.Errorf("error sending request: %v", err)
 	}
-	defer resp.Body.Close()
 
-	body, _ := ioutil.ReadAll(resp.Body)
+	// レスポンスの解析
 	var result map[string]interface{}
-	json.Unmarshal(body, &result)
-
-	if joinURL, ok := result["joinUrl"].(string); ok {
-		return joinURL, nil
+	if err := json.Unmarshal(resp.Body(), &result); err != nil {
+		return fmt.Errorf("error unmarshalling response: %v", err)
 	}
 
-	return "", fmt.Errorf("会議URLの取得に失敗しました: %v", result)
+	// 会議の参加URLを取得
+	joinURL := result["joinUrl"].(string)
+	fmt.Println("Meeting URL: ", joinURL)
+
+	return nil
 }
 
-// メイン関数
 func main() {
-	token, err := getAccessToken()
+	// アクセストークンの取得
+	accessToken, err := getAccessToken()
 	if err != nil {
-		fmt.Println("アクセストークン取得エラー:", err)
-		os.Exit(1)
+		log.Fatalf("Error getting access token: %v", err)
 	}
 
-	joinURL, err := createTeamsMeeting(token)
-	if err != nil {
-		fmt.Println("会議作成エラー:", err)
-		os.Exit(1)
+	// Teams会議のURLを作成
+	if err := createOnlineMeeting(accessToken); err != nil {
+		log.Fatalf("Error creating online meeting: %v", err)
 	}
-
-	fmt.Println("Teams会議URL:", joinURL)
 }
